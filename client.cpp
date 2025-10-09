@@ -20,12 +20,15 @@ using namespace std;
 
 int main (int argc, char *argv[]) {
 	int opt;
-    int p = -1;
-    double t = -1.0;
-    int e = -1;
+    int p = -1;         //person
+    double t = -1.0;    //time
+    int e = -1;         //ecg number
     string filename = "";
     int m = MAX_MESSAGE;   // buffer capacity
     bool newchannel = false;
+
+    // declare here so scope isnt limited
+    FIFORequestChannel* newchan = nullptr;
 
     // Parse command line args
     while ((opt = getopt(argc, argv, "p:t:e:f:m:c")) != -1) {
@@ -58,32 +61,40 @@ int main (int argc, char *argv[]) {
         chan->cwrite(&nc, sizeof(MESSAGE_TYPE));
         char namebuf[100];
         chan->cread(namebuf, sizeof(namebuf));
-        FIFORequestChannel* newchan = new FIFORequestChannel(namebuf, FIFORequestChannel::CLIENT_SIDE);
-        delete chan;
-        chan = newchan; // use the new channel
+        newchan = new FIFORequestChannel(namebuf, FIFORequestChannel::CLIENT_SIDE);
+
     }
 
     // --- Step 3: Handle requests ---
-    if (p != -1 && t >= 0.0 && e != -1) {
+    FIFORequestChannel* active_chan;
+    if(newchan){
+        active_chan = newchan;
+    }
+    else{
+        active_chan = chan;
+    }
+
+
+    if (p != -1 && t >= 0.0 && e != -1) {       //if person is set, time is valid, and ecg value valid, (no filename listed)
         // Single data point
         datamsg d(p, t, e);
-        chan->cwrite(&d, sizeof(d));
+        active_chan->cwrite(&d, sizeof(d));
         double reply;
-        chan->cread(&reply, sizeof(double));
-        cout << "For person " << p << ", at time " << t << ", ecg " << e
-             << " = " << reply << endl;
+        active_chan->cread(&reply, sizeof(double));
+        cout << "For person " << p << ", at time " << t << ", the value of ecg " << e
+             << " is " << reply << endl;
 
-    } else if (p != -1 && t < 0.0 && e == -1 && filename.empty()) {
+    } else if (p != -1 && t < 0.0 && e == -1 && filename.empty()) {     // person is set, but time not valid, ecg invalid, and no filename (1000 points)
         // First 1000 points -> x1.csv
-        ofstream outfile("x1.csv");
+        ofstream outfile("received/x1.csv");
         for (int i = 0; i < 1000; i++) {
-            double ti = i * 0.004; // 4 ms steps
+            double ti = i * 0.004; // ti is 4 ms increments
             outfile << ti << ",";
-            for (int ecg = 1; ecg <= 2; ecg++) {
+            for (int ecg = 1; ecg <= 2; ecg++) {        // person p @ time ti: ecg1 and ecg2 data
                 datamsg d(p, ti, ecg);
-                chan->cwrite(&d, sizeof(d));
+                active_chan->cwrite(&d, sizeof(d));
                 double resp;
-                chan->cread(&resp, sizeof(double));
+                active_chan->cread(&resp, sizeof(double));
                 outfile << resp;
                 if (ecg == 1) outfile << ",";
             }
@@ -91,7 +102,7 @@ int main (int argc, char *argv[]) {
         }
         outfile.close();
 
-    } else if (!filename.empty()) {
+    } else if (!filename.empty()) {     //person is not set ==> file request
         // File request
         string outname = "received/" + filename;
         system("mkdir -p received"); // make sure directory exists
@@ -102,10 +113,10 @@ int main (int argc, char *argv[]) {
         char* buf = new char[len];
         memcpy(buf, &fm, sizeof(filemsg));
         strcpy(buf + sizeof(filemsg), filename.c_str());
-        chan->cwrite(buf, len);
+        active_chan->cwrite(buf, len);
 
         __int64_t filesize;
-        chan->cread(&filesize, sizeof(__int64_t));
+        active_chan->cread(&filesize, sizeof(__int64_t));
 
         ofstream of(outname, ios::binary);
         __int64_t offset = 0;
@@ -114,10 +125,10 @@ int main (int argc, char *argv[]) {
             filemsg fm(offset, chunk);
             memcpy(buf, &fm, sizeof(filemsg));
             strcpy(buf + sizeof(filemsg), filename.c_str());
-            chan->cwrite(buf, len);
+            active_chan->cwrite(buf, len);
 
             vector<char> response(chunk);
-            chan->cread(response.data(), chunk);
+            active_chan->cread(response.data(), chunk);
             of.write(response.data(), chunk);
             offset += chunk;
         }
@@ -127,9 +138,22 @@ int main (int argc, char *argv[]) {
 
     // --- Step 4: clean up ---
     MESSAGE_TYPE q = QUIT_MSG;
+
+    // quit new channel first (if it exists)
+    if (newchan) {
+        newchan->cwrite(&q, sizeof(MESSAGE_TYPE));
+        delete newchan;
+    }
+
+    // quit control channel last
     chan->cwrite(&q, sizeof(MESSAGE_TYPE));
     delete chan;
 
     wait(nullptr); // wait for server
     return 0;
 }
+
+
+// chan (FIFORequestChannel): bidirectional pipe
+// fifo_control1: Server writes → Client reads
+// fifo_control2: Client writes → Server reads
